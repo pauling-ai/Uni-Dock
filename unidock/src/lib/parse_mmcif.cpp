@@ -20,7 +20,8 @@
    - element (type_symbol) gives the base type; C/N/O/S/H are refined below.
    - covalent connectivity is perceived with the same criterion as model::assign_bonds.
    - residues that contain hydrogens are typed from connectivity alone, like a prepared PDBQT:
-     H bonded to N/O/S -> HD, N without H and with <= 2 neighbours -> NA, O -> OA, S -> SA.
+     H bonded to N/O/S -> HD, N without H and with <= 2 non-metal neighbours -> NA (not for
+     backbone N), O -> OA, S -> SA.
      Donors then come out of model::assign_types through the HD atoms, exactly as for PDBQT.
    - residues without hydrogens (typical for PDB/AlphaFold files) use built-in templates of
      standard amino acids, nucleotides and water to know which heavy atoms carry polar
@@ -35,6 +36,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <initializer_list>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -405,6 +407,7 @@ struct residue_template {
     std::map<std::string, unsigned> atoms;
     bool amino_acid = false;
     bool ambiguous_his = false;  // HIS without a tautomer: ND1/NE2 may be donor or acceptor
+    bool nucleotide = false;
 };
 
 typedef std::map<std::string, residue_template> template_map;
@@ -469,6 +472,7 @@ const template_map& residue_templates() {
         add_templates(t, "DG", purine + "N1:D N2:D N3:A N7:A", false);
         add_templates(t, "DC", pyrimidine + "N3:A N4:D", false);
         add_templates(t, "DT", pyrimidine + "N3:D", false);
+        for (const char* nt : {"A", "C", "G", "U", "DA", "DC", "DG", "DT"}) t[nt].nucleotide = true;
         return t;
     }();
     return tm;
@@ -507,7 +511,8 @@ connectivity perceive_bonds(const atomv& atoms) {
     con.heavy_degree.assign(n, 0);
     con.h_count.assign(n, 0);
     con.metal_neighbors.assign(n, 0);
-    std::vector<fl> h_best(n, max_fl);
+    std::vector<fl> h_best(n, max_fl), h_best_metal(n, max_fl);
+    std::vector<int> h_metal_parent(n, -1);
 
     const fl cell = 4.0;  // >= 1.1 * 2 * largest covalent radius
     typedef long long cell_key;
@@ -540,10 +545,15 @@ connectivity perceive_bonds(const atomv& atoms) {
                         const fl r2 = vec_distance_sqr(c, aj.coords);
                         if (r2 >= sqr(1.1 * ai.optimal_covalent_bond_length(aj))) continue;
                         if (hi || hj) {
+                            // a hydrogen pointing at a coordinated metal still belongs to its
+                            // N/O, so metals are only a fallback parent
                             const sz h = hi ? i : j, heavy = hi ? j : i;
-                            if (r2 < h_best[h]) {
-                                h_best[h] = r2;
-                                con.h_parent[h] = int(heavy);
+                            const bool metal = is_metal(atoms[heavy]);
+                            std::vector<fl>& best = metal ? h_best_metal : h_best;
+                            std::vector<int>& parent = metal ? h_metal_parent : con.h_parent;
+                            if (r2 < best[h]) {
+                                best[h] = r2;
+                                parent[h] = int(heavy);
                             }
                         } else {
                             ++con.heavy_degree[i];
@@ -554,8 +564,10 @@ connectivity perceive_bonds(const atomv& atoms) {
                     }
                 }
     }
-    VINA_FOR(i, n)
-    if (con.h_parent[i] >= 0) ++con.h_count[sz(con.h_parent[i])];
+    VINA_FOR(i, n) {
+        if (con.h_parent[i] < 0) con.h_parent[i] = h_metal_parent[i];
+        if (con.h_parent[i] >= 0) ++con.h_count[sz(con.h_parent[i])];
+    }
     return con;
 }
 
@@ -656,15 +668,25 @@ void parse_mmcif_rigid(std::istream& in, rigid& r) {
             } else if (el == EL_TYPE_S && a.ad == AD_TYPE_S && raw[i].element == "S") {
                 if (con.heavy_degree[i] + con.h_count[i] < 4) a.ad = AD_TYPE_SA;
             } else if (el == EL_TYPE_N || el == EL_TYPE_O) {
+                const bool backbone_n
+                    = el == EL_TYPE_N && name == "N" && (backbone_like || (tpl && tpl->amino_acid));
                 if (res.has_hydrogens) {
-                    // prepared residue: donors come from the HD atoms, as for PDBQT
+                    // prepared residue: donors come from the HD atoms, as for PDBQT. A
+                    // nitrogen without H and with at most 2 covalent (non-metal) neighbours is
+                    // an acceptor, except a backbone amide N (e.g. proline after a chain break)
                     if (el == EL_TYPE_N)
-                        acceptor[i] = con.h_count[i] == 0 && con.heavy_degree[i] <= 2;
+                        acceptor[i] = con.h_count[i] == 0
+                                      && con.heavy_degree[i] - con.metal_neighbors[i] <= 2
+                                      && !backbone_n;
                 } else if (tpl) {
                     donor[i] = (flags & TPL_DONOR) != 0;
                     acceptor[i] = el == EL_TYPE_N && (flags & TPL_ACCEPTOR);
                     if (el == EL_TYPE_N && con.metal_neighbors[i] > 0)
                         donor[i] = acceptor[i] = false;  // metal-coordinating nitrogen
+                    // 5'/3' terminal hydroxyls of a nucleic acid chain
+                    if (tpl->nucleotide && (name == "O5'" || name == "O3'")
+                        && con.heavy_degree[i] <= 1)
+                        donor[i] = true;
                 } else {
                     if (el == EL_TYPE_N && name == "N" && backbone_like
                         && con.heavy_degree[i] <= 2)
