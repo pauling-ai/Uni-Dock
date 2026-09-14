@@ -21,6 +21,7 @@
 */
 
 #include "vina.h"
+#include "parse_mmcif.h"
 #include "scoring_function.h"
 #include "precalculate.h"
 #include "omp.h"
@@ -82,8 +83,17 @@ void Vina::set_receptor(const std::string& rigid_name, const std::string& flex_n
         exit(EXIT_FAILURE);
     }
 
+    if (is_mmcif_file_name(flex_name)) {
+        std::cerr << "ERROR: Flexible residues must be given in PDBQT format (mmCIF is only "
+                     "supported for the rigid receptor).\n";
+        exit(EXIT_FAILURE);
+    }
+
     // CONDITIONS 4, 5, 6, 7 (rigid_name and flex_name are empty strings per default)
-    if (rigid_name.find("pdbqt") || flex_name.find("pdbqt")) {
+    if (!rigid_name.empty() && is_mmcif_file_name(rigid_name)) {
+        m_receptor
+            = parse_receptor_mmcif(rigid_name, flex_name, m_scoring_function->get_atom_typing());
+    } else if (rigid_name.find("pdbqt") || flex_name.find("pdbqt")) {
         m_receptor
             = parse_receptor_pdbqt(rigid_name, flex_name, m_scoring_function->get_atom_typing());
     } else if (rigid_name.find("pdb") && (!rigid_name.find("pdbqt"))) {

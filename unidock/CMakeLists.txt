@@ -132,6 +132,7 @@ add_library(
   src/lib/mutate.cpp
   src/lib/parallel_mc.cpp
   src/lib/parse_pdbqt.cpp
+  src/lib/parse_mmcif.cpp
   src/lib/quasi_newton.cpp
   src/lib/quaternion.cpp
   src/lib/random.cpp

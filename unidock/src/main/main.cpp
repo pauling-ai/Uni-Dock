@@ -420,7 +420,7 @@ bug reporting, license agreements, and more information.      \n";
 
         options_description inputs("Input");
         inputs.add_options()("receptor", value<std::string>(&rigid_name),
-                             "rigid part of the receptor (PDBQT or PDB)")(
+                             "rigid part of the receptor (PDBQT, or mmCIF: .cif/.mmcif)")(
             "flex", value<std::string>(&flex_name), "flexible side chains, if any (PDBQT or PDB)")(
             "ligand", value<std::vector<std::string> >(&ligand_names)->multitoken(),
             "ligand (PDBQT)")("ligand_index", value<std::string>(&ligand_index),

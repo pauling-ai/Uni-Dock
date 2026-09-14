@@ -28,6 +28,8 @@
 #include <set>
 struct rigid {
     atomv atoms;
+    // mmCIF only: heavy atoms known to carry polar hydrogens that are absent from the file
+    std::vector<bool> implicit_donors;
 };
 model parse_receptor_pdbqt(const std::string &rigid = std::string(),
                            const std::string &flex = std::string(),
@@ -35,6 +37,8 @@ model parse_receptor_pdbqt(const std::string &rigid = std::string(),
 model parse_receptor_pdb(const std::string &rigid = std::string(),
                          const std::string &flex = std::string(),
                          atom_type::t atype = atom_type::XS);  // can throw struct_parse_error
+model parse_receptor_mmcif(const std::string &rigid, const std::string &flex = std::string(),
+                           atom_type::t atype = atom_type::XS);  // flex residues stay PDBQT
 
 model parse_ligand_pdbqt_from_file(const std::string &name, atom_type::t atype,
                                    bool keep_H = false);  // can throw struct_parse_error
