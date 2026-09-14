@@ -61,7 +61,7 @@ End-to-End pipeline to run Uni-Dock with common-format receptor and ligands
 ### Parameters
 
 #### IO Parameters
-- `-r, --receptor`: Path to the receptor file in PDBQT format.
+- `-r, --receptor`: Path to the receptor file in PDB, PDBQT or mmCIF (`.cif`/`.mmcif`) format. mmCIF receptors are passed to Uni-Dock as-is and read natively (vina/vinardo scoring).
 - `-l, --ligands`: Path to the ligand file in SDF format. For multiple files, separate them by commas.
 - `-i, --ligand_index`: A text file containing the path of ligand files in sdf format.
 - `-sd, --savedir`: Save directory (default: 'unidock_results').
