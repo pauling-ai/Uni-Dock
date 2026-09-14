@@ -25,8 +25,10 @@
      Donors then come out of model::assign_types through the HD atoms, exactly as for PDBQT.
    - residues without hydrogens (typical for PDB/AlphaFold files) use built-in templates of
      standard amino acids, nucleotides and water to know which heavy atoms carry polar
-     hydrogens. Those atoms are reported in rigid::implicit_donors and promoted to XS donors
-     after typing (see parse_receptor_mmcif).
+     hydrogens; histidine tautomers come from their hydrogen-bond partners, and residues
+     without a template (ligands, cofactors, modified residues) are typed from bond lengths,
+     angles and ring planarity. Those atoms are reported in rigid::implicit_donors and promoted
+     to XS donors after typing (see parse_receptor_mmcif).
 
 */
 
@@ -496,73 +498,90 @@ bool element_to_atom_type(const std::string& el, atom& a) {
 
 bool is_metal(const atom& a) { return ad_type_to_el_type(a.ad) == EL_TYPE_Met || a.xs == XS_TYPE_Met_D; }
 
+// uniform grid for neighbour searches; queries cover the 27 cells around a point
+class spatial_grid {
+public:
+    spatial_grid(const atomv& atoms, fl cell) : m_cell(cell) {
+        VINA_FOR_IN(i, atoms) m_cells[key_of(atoms[i].coords)].push_back(i);
+    }
+
+    template <typename F> void for_each_near(const vec& c, F f) const {
+        const cell_key cx = index(c[0]), cy = index(c[1]), cz = index(c[2]);
+        for (cell_key dx = -1; dx <= 1; ++dx)
+            for (cell_key dy = -1; dy <= 1; ++dy)
+                for (cell_key dz = -1; dz <= 1; ++dz) {
+                    std::unordered_map<cell_key, szv>::const_iterator it
+                        = m_cells.find(key(cx + dx, cy + dy, cz + dz));
+                    if (it == m_cells.end()) continue;
+                    for (sz j : it->second) f(j);
+                }
+    }
+
+private:
+    typedef long long cell_key;
+    cell_key index(fl v) const { return cell_key(std::floor(v / m_cell)); }
+    static cell_key key(cell_key x, cell_key y, cell_key z) {
+        const cell_key off = 1 << 20;
+        return ((x + off) << 42) | ((y + off) << 21) | (z + off);
+    }
+    cell_key key_of(const vec& c) const { return key(index(c[0]), index(c[1]), index(c[2])); }
+
+    fl m_cell;
+    std::unordered_map<cell_key, szv> m_cells;
+};
+
 struct connectivity {
     std::vector<int> h_parent;  // hydrogens: nearest bonded non-hydrogen, -1 if none
     szv heavy_degree;           // bonded non-hydrogen neighbours (metals included)
     szv h_count;                // hydrogens attached
     szv metal_neighbors;
+    std::vector<szv> neighbors;  // bonded non-hydrogen, non-metal neighbours
 };
 
 // same bonding criterion as model::assign_bonds: r < 1.1 * (covalent radius i + covalent radius j)
-connectivity perceive_bonds(const atomv& atoms) {
+connectivity perceive_bonds(const atomv& atoms, const spatial_grid& grid) {
     const sz n = atoms.size();
     connectivity con;
     con.h_parent.assign(n, -1);
     con.heavy_degree.assign(n, 0);
     con.h_count.assign(n, 0);
     con.metal_neighbors.assign(n, 0);
+    con.neighbors.assign(n, szv());
     std::vector<fl> h_best(n, max_fl), h_best_metal(n, max_fl);
     std::vector<int> h_metal_parent(n, -1);
 
-    const fl cell = 4.0;  // >= 1.1 * 2 * largest covalent radius
-    typedef long long cell_key;
-    const auto cell_index = [&](fl c) { return cell_key(std::floor(c / cell)); };
-    const auto key = [](cell_key x, cell_key y, cell_key z) {
-        const cell_key off = 1 << 20;
-        return ((x + off) << 42) | ((y + off) << 21) | (z + off);
-    };
-    std::unordered_map<cell_key, szv> cells;
-    VINA_FOR(i, n) {
-        const vec& c = atoms[i].coords;
-        cells[key(cell_index(c[0]), cell_index(c[1]), cell_index(c[2]))].push_back(i);
-    }
-
     VINA_FOR(i, n) {
         const atom& ai = atoms[i];
-        const vec& c = ai.coords;
-        const cell_key cx = cell_index(c[0]), cy = cell_index(c[1]), cz = cell_index(c[2]);
-        for (cell_key dx = -1; dx <= 1; ++dx)
-            for (cell_key dy = -1; dy <= 1; ++dy)
-                for (cell_key dz = -1; dz <= 1; ++dz) {
-                    std::unordered_map<cell_key, szv>::const_iterator it
-                        = cells.find(key(cx + dx, cy + dy, cz + dz));
-                    if (it == cells.end()) continue;
-                    for (sz j : it->second) {
-                        if (j <= i) continue;
-                        const atom& aj = atoms[j];
-                        const bool hi = ai.is_hydrogen(), hj = aj.is_hydrogen();
-                        if (hi && hj) continue;
-                        const fl r2 = vec_distance_sqr(c, aj.coords);
-                        if (r2 >= sqr(1.1 * ai.optimal_covalent_bond_length(aj))) continue;
-                        if (hi || hj) {
-                            // a hydrogen pointing at a coordinated metal still belongs to its
-                            // N/O, so metals are only a fallback parent
-                            const sz h = hi ? i : j, heavy = hi ? j : i;
-                            const bool metal = is_metal(atoms[heavy]);
-                            std::vector<fl>& best = metal ? h_best_metal : h_best;
-                            std::vector<int>& parent = metal ? h_metal_parent : con.h_parent;
-                            if (r2 < best[h]) {
-                                best[h] = r2;
-                                parent[h] = int(heavy);
-                            }
-                        } else {
-                            ++con.heavy_degree[i];
-                            ++con.heavy_degree[j];
-                            if (is_metal(aj)) ++con.metal_neighbors[i];
-                            if (is_metal(ai)) ++con.metal_neighbors[j];
-                        }
-                    }
+        grid.for_each_near(ai.coords, [&](sz j) {
+            if (j <= i) return;
+            const atom& aj = atoms[j];
+            const bool hi = ai.is_hydrogen(), hj = aj.is_hydrogen();
+            if (hi && hj) return;
+            const fl r2 = vec_distance_sqr(ai.coords, aj.coords);
+            if (r2 >= sqr(1.1 * ai.optimal_covalent_bond_length(aj))) return;
+            if (hi || hj) {
+                // a hydrogen pointing at a coordinated metal still belongs to its N/O, so
+                // metals are only a fallback parent
+                const sz h = hi ? i : j, heavy = hi ? j : i;
+                const bool metal = is_metal(atoms[heavy]);
+                std::vector<fl>& best = metal ? h_best_metal : h_best;
+                std::vector<int>& parent = metal ? h_metal_parent : con.h_parent;
+                if (r2 < best[h]) {
+                    best[h] = r2;
+                    parent[h] = int(heavy);
                 }
+            } else {
+                ++con.heavy_degree[i];
+                ++con.heavy_degree[j];
+                const bool mi = is_metal(ai), mj = is_metal(aj);
+                if (mj) ++con.metal_neighbors[i];
+                if (mi) ++con.metal_neighbors[j];
+                if (!mi && !mj) {
+                    con.neighbors[i].push_back(j);
+                    con.neighbors[j].push_back(i);
+                }
+            }
+        });
     }
     VINA_FOR(i, n) {
         if (con.h_parent[i] < 0) con.h_parent[i] = h_metal_parent[i];
@@ -570,6 +589,301 @@ connectivity perceive_bonds(const atomv& atoms) {
     }
     return con;
 }
+
+// ------------------------------------------------------------------------------------------------
+// Geometry-based perception of polar hydrogens for residues that have neither hydrogens nor a
+// template (ligands, cofactors, modified residues). Bond lengths separate single from double
+// bonds (C-OH >= 1.30 A > C=O, C#N <= 1.20 A), ring planarity identifies aromatic rings, and
+// protonation follows pH 7 (carboxylates, phosphates and sulfates are deprotonated).
+
+class geometry_typer {
+public:
+    geometry_typer(const atomv& atoms, const connectivity& con) : m_atoms(atoms), m_con(con) {}
+
+    struct polar {
+        bool donor = false;
+        bool acceptor = false;
+    };
+
+    polar oxygen(sz i) const {
+        polar t;
+        t.acceptor = true;
+        const szv& nb = m_con.neighbors[i];
+        if (nb.empty()) {  // water or hydroxide
+            t.donor = true;
+            return t;
+        }
+        if (nb.size() > 1) return t;  // ether, ester, ring oxygen
+        const sz x = nb[0];
+        const sz xel = element(x);
+        if (xel == EL_TYPE_C) {
+            // carboxyl groups are carboxylates at pH 7; otherwise a long C-O bond is a hydroxyl
+            t.donor = terminal_oxygens(x) == 1 && distance(i, x) > 1.30;
+        } else if (xel == EL_TYPE_N) {
+            t.donor = terminal_oxygens(x) == 1 && distance(i, x) >= 1.34;  // not nitro/N-oxide
+        } else if (xel != EL_TYPE_P && xel != EL_TYPE_S) {
+            t.donor = true;  // e.g. B-OH, Si-OH; phosphates and sulfates are deprotonated
+        }
+        return t;
+    }
+
+    polar nitrogen(sz i) const {
+        polar t;
+        if (m_con.metal_neighbors[i] > 0) return t;  // coordinated to a metal (e.g. heme)
+        const szv& nb = m_con.neighbors[i];
+        if (nb.empty()) {
+            t.donor = true;  // ammonia/ammonium
+        } else if (nb.size() == 1) {
+            if (distance(i, nb[0]) <= 1.20) {
+                t.acceptor = true;  // nitrile
+            } else {
+                t.donor = true;  // amine, amide or amidine NH2
+                t.acceptor = is_sulfonyl(nb[0]);  // sulfonamide N, typed NA by Meeko
+            }
+        } else if (nb.size() == 2) {
+            two_neighbor_nitrogen(i, t);
+        } else if (nb.size() == 3) {
+            t.donor = tertiary_aliphatic_amine(i);  // protonated at pH 7
+        }
+        // otherwise amide, aniline or aromatic N with three neighbours: plain N, as AutoDock
+        return t;
+    }
+
+    bool aromatic_carbon(sz i) const {
+        for (const szv& ring : planar_rings(i))
+            if (ring.size() >= 5) return true;
+        return false;
+    }
+
+private:
+    sz element(sz i) const { return ad_type_to_el_type(m_atoms[i].ad); }
+    fl distance(sz i, sz j) const {
+        return std::sqrt(vec_distance_sqr(m_atoms[i].coords, m_atoms[j].coords));
+    }
+
+    // oxygens bonded only to atom x
+    sz terminal_oxygens(sz x) const {
+        sz count = 0;
+        for (sz j : m_con.neighbors[x])
+            if (element(j) == EL_TYPE_O && m_con.neighbors[j].size() == 1) ++count;
+        return count;
+    }
+
+    bool is_carbonyl_carbon(sz c) const {
+        if (element(c) != EL_TYPE_C) return false;
+        for (sz j : m_con.neighbors[c])
+            if (element(j) == EL_TYPE_O && m_con.neighbors[j].size() == 1 && distance(c, j) <= 1.30)
+                return true;
+        return false;
+    }
+
+    bool is_sulfonyl(sz x) const { return element(x) == EL_TYPE_S && terminal_oxygens(x) >= 2; }
+
+    // carbon without double bonds, judged from the angles around it
+    bool is_sp3_carbon(sz c) const {
+        if (element(c) != EL_TYPE_C) return false;
+        const szv& nb = m_con.neighbors[c];
+        if (nb.size() == 2) return angle_deg(m_atoms[nb[0]].coords, m_atoms[c].coords, m_atoms[nb[1]].coords) < 117;
+        if (nb.size() == 3) return angle_sum(c) < 350;
+        return true;
+    }
+
+    fl angle_sum(sz center) const {
+        const szv& nb = m_con.neighbors[center];
+        fl sum = 0;
+        VINA_FOR_IN(a, nb)
+        VINA_RANGE(b, a + 1, nb.size())
+        sum += angle_deg(m_atoms[nb[a]].coords, m_atoms[center].coords, m_atoms[nb[b]].coords);
+        return sum;
+    }
+
+    // pyramidal N bonded by single bonds to three sp3 carbons
+    bool tertiary_aliphatic_amine(sz n) const {
+        if (angle_sum(n) >= 345) return false;
+        for (sz c : m_con.neighbors[n])
+            if (!is_sp3_carbon(c) || distance(n, c) < 1.43) return false;
+        return true;
+    }
+
+    bool has_exocyclic_nitrogen(sz c, const szv& ring) const {
+        for (sz j : m_con.neighbors[c])
+            if (element(j) == EL_TYPE_N && std::find(ring.begin(), ring.end(), j) == ring.end())
+                return true;
+        return false;
+    }
+
+    // planar 5- or 6-membered rings through atom i
+    std::vector<szv> planar_rings(sz start) const {
+        std::vector<szv> rings;
+        std::set<szv> seen;
+        szv path(1, start);
+        find_rings(start, path, rings, seen);
+        return rings;
+    }
+
+    void find_rings(sz start, szv& path, std::vector<szv>& rings, std::set<szv>& seen) const {
+        for (sz nb : m_con.neighbors[path.back()]) {
+            if (nb == start && path.size() >= 5) {
+                szv key = path;
+                std::sort(key.begin(), key.end());
+                if (seen.insert(key).second && planar(path)) rings.push_back(path);
+                continue;
+            }
+            if (path.size() >= 6 || std::find(path.begin(), path.end(), nb) != path.end()) continue;
+            if (m_con.neighbors[nb].size() > 3) continue;  // sp3 atom: not an aromatic ring
+            path.push_back(nb);
+            find_rings(start, path, rings, seen);
+            path.pop_back();
+        }
+    }
+
+    bool planar(const szv& ring) const {
+        vec centroid(0, 0, 0);
+        for (sz k : ring) centroid += m_atoms[k].coords;
+        centroid = centroid / fl(ring.size());
+        vec normal(0, 0, 0);
+        VINA_FOR_IN(k, ring)
+        normal += cross_product(m_atoms[ring[k]].coords - centroid,
+                                m_atoms[ring[(k + 1) % ring.size()]].coords - centroid);
+        const fl len = normal.norm();
+        if (len < epsilon_fl) return false;
+        normal = normal / len;
+        for (sz k : ring)
+            if (std::abs((m_atoms[k].coords - centroid) * normal) > 0.1) return false;
+        return true;
+    }
+
+    void two_neighbor_nitrogen(sz i, polar& t) const {
+        const szv& nb = m_con.neighbors[i];
+        const std::vector<szv> rings = planar_rings(i);
+        const szv* ring6 = nullptr;
+        const szv* ring5 = nullptr;
+        for (const szv& ring : rings) {
+            if (ring.size() == 6 && !ring6) ring6 = &ring;
+            if (ring.size() == 5 && !ring5) ring5 = &ring;
+        }
+        const sz carbonyls = sz(is_carbonyl_carbon(nb[0])) + sz(is_carbonyl_carbon(nb[1]));
+
+        if (ring6) {
+            // pyridine-like acceptor, unless next to a ring carbonyl (lactam N-H)
+            const bool amino = has_exocyclic_nitrogen(nb[0], *ring6)
+                               || has_exocyclic_nitrogen(nb[1], *ring6);
+            t.acceptor = carbonyls == 0 || amino;
+            t.donor = carbonyls > 0;
+        } else if (ring5) {
+            bool pyrrole_type_partner = false;
+            sz pyridine_type_partners = 0;
+            for (sz k : *ring5) {
+                if (k == i) continue;
+                const sz el = element(k);
+                if (el == EL_TYPE_O || el == EL_TYPE_S
+                    || (el == EL_TYPE_N && m_con.neighbors[k].size() == 3))
+                    pyrrole_type_partner = true;
+                else if (el == EL_TYPE_N && m_con.neighbors[k].size() == 2)
+                    ++pyridine_type_partners;
+            }
+            if (carbonyls > 0) {
+                t.donor = true;  // imide/lactam N-H
+            } else if (pyrrole_type_partner) {
+                t.acceptor = true;  // oxazole/thiazole N, N-substituted imidazole N3, purine N7
+            } else if (pyridine_type_partners == 0) {
+                t.donor = true;  // pyrrole/indole N-H
+            } else {
+                t.donor = t.acceptor = true;  // unsubstituted imidazole/pyrazole/triazole
+            }
+        } else if (angle_deg(m_atoms[nb[0]].coords, m_atoms[i].coords, m_atoms[nb[1]].coords)
+                   >= 160) {
+            t.acceptor = true;  // linear: azide, carbodiimide
+        } else {
+            // a short bond to carbon or nitrogen is a C=N / N=N double bond (no H) unless the
+            // carbon is an amidine/guanidine, which is protonated at pH 7
+            for (sz x : nb) {
+                const sz xel = element(x);
+                if ((xel == EL_TYPE_C && distance(i, x) <= 1.30)
+                    || (xel == EL_TYPE_N && distance(i, x) <= 1.28)) {
+                    bool amidine = false;
+                    if (xel == EL_TYPE_C)
+                        for (sz y : m_con.neighbors[x])
+                            if (y != i && element(y) == EL_TYPE_N) amidine = true;
+                    if (!amidine) {
+                        t.acceptor = true;
+                        return;
+                    }
+                }
+            }
+            t.donor = true;  // secondary amide, amine, sulfonamide, amidinium
+            t.acceptor = is_sulfonyl(nb[0]) || is_sulfonyl(nb[1]);
+        }
+    }
+
+    static fl angle_deg(const vec& a, const vec& center, const vec& b) {
+        const vec u = a - center, v = b - center;
+        fl c = (u * v) / (u.norm() * v.norm());
+        c = std::max(fl(-1), std::min(fl(1), c));
+        return std::acos(c) * 180 / pi;
+    }
+
+    const atomv& m_atoms;
+    const connectivity& m_con;
+};
+
+// ------------------------------------------------------------------------------------------------
+// Histidines without hydrogens: the tautomer is taken from hydrogen-bond partners in the
+// direction where the ring N-H would point. A pure acceptor (carboxylate, backbone O) in front of
+// a ring nitrogen means that nitrogen carries the hydrogen; a pure donor means it does not.
+// Without evidence HID is used, the default of PDB2PQR and OpenMM/PDBFixer.
+
+struct his_counts {
+    sz hid = 0, hie = 0, hip = 0, unresolved = 0;
+};
+
+class histidine_resolver {
+public:
+    histidine_resolver(const atomv& atoms, const connectivity& con, const spatial_grid& grid,
+                       const szv& residue_of, const std::vector<bool>& donor,
+                       const std::vector<bool>& acceptor)
+        : m_atoms(atoms),
+          m_con(con),
+          m_grid(grid),
+          m_residue_of(residue_of),
+          m_donor(donor),
+          m_acceptor(acceptor) {}
+
+    // +1: the nitrogen should carry the hydrogen, -1: it should not, 0: no evidence
+    int vote(sz n) const {
+        const szv& nb = m_con.neighbors[n];
+        if (nb.size() != 2) return 0;
+        const vec& p = m_atoms[n].coords;
+        vec out = p - fl(0.5) * (m_atoms[nb[0]].coords + m_atoms[nb[1]].coords);
+        const fl out_len = out.norm();
+        if (out_len < epsilon_fl) return 0;
+        out = out / out_len;
+
+        fl best = 3.3;
+        int result = 0;
+        m_grid.for_each_near(p, [&](sz j) {
+            if (m_residue_of[j] == m_residue_of[n]) return;
+            const sz el = ad_type_to_el_type(m_atoms[j].ad);
+            if (el != EL_TYPE_N && el != EL_TYPE_O) return;
+            const fl d = std::sqrt(vec_distance_sqr(p, m_atoms[j].coords));
+            if (d < 2.5 || d >= best) return;
+            if (((m_atoms[j].coords - p) / d) * out < 0.64) return;  // more than ~50 deg off
+            const bool jd = m_donor[j], ja = m_acceptor[j];
+            if (jd == ja) return;  // water, hydroxyl, other histidine: no information
+            best = d;
+            result = ja ? 1 : -1;
+        });
+        return result;
+    }
+
+private:
+    const atomv& m_atoms;
+    const connectivity& m_con;
+    const spatial_grid& m_grid;
+    const szv& m_residue_of;
+    const std::vector<bool>& m_donor;
+    const std::vector<bool>& m_acceptor;
+};
 
 struct residue_info {
     std::string name;
@@ -610,6 +924,7 @@ void parse_mmcif_rigid(std::istream& in, rigid& r) {
 
     atomv atoms(n);
     std::vector<residue_info> residues;
+    szv residue_of(n);
     std::unordered_map<std::string, sz> residue_index;
     VINA_FOR(i, n) {
         atom& a = atoms[i];
@@ -628,25 +943,29 @@ void parse_mmcif_rigid(std::istream& in, rigid& r) {
             residues.push_back(residue_info());
             residues.back().name = to_upper(raw[i].res_name);
         }
+        residue_of[i] = it->second;
         residue_info& res = residues[it->second];
         res.atoms.push_back(i);
         if (a.is_hydrogen()) res.has_hydrogens = true;
     }
 
-    const connectivity con = perceive_bonds(atoms);
+    const spatial_grid grid(atoms, 4.0);  // cell >= bond cutoff and H-bond search radius
+    const connectivity con = perceive_bonds(atoms, grid);
+    const geometry_typer geometry(atoms, con);
     const template_map& templates = residue_templates();
     std::vector<bool> donor(n, false), acceptor(n, false);
-    std::set<std::string> untyped_residues, ambiguous_his;
+    std::set<std::string> geometry_residues;
+    std::vector<const residue_info*> unresolved_his;
 
     for (const residue_info& res : residues) {
         template_map::const_iterator tpl_it = templates.find(res.name);
         const residue_template* tpl = tpl_it == templates.end() ? nullptr : &tpl_it->second;
-        bool backbone_like = false, has_ca = false, has_c = false;
+        bool has_ca = false, has_c = false;
         for (sz i : res.atoms) {
             if (raw[i].name == "CA") has_ca = true;
             if (raw[i].name == "C") has_c = true;
         }
-        backbone_like = has_ca && has_c;
+        const bool backbone_like = has_ca && has_c;
 
         for (sz i : res.atoms) {
             atom& a = atoms[i];
@@ -664,7 +983,8 @@ void parse_mmcif_rigid(std::istream& in, rigid& r) {
                 a.ad = (pel == EL_TYPE_N || pel == EL_TYPE_O || pel == EL_TYPE_S) ? AD_TYPE_HD
                                                                                   : AD_TYPE_H;
             } else if (el == EL_TYPE_C) {
-                if (flags & TPL_AROMATIC) a.ad = AD_TYPE_A;
+                if ((flags & TPL_AROMATIC) || (!tpl && geometry.aromatic_carbon(i)))
+                    a.ad = AD_TYPE_A;
             } else if (el == EL_TYPE_S && a.ad == AD_TYPE_S && raw[i].element == "S") {
                 if (con.heavy_degree[i] + con.h_count[i] < 4) a.ad = AD_TYPE_SA;
             } else if (el == EL_TYPE_N || el == EL_TYPE_O) {
@@ -674,13 +994,14 @@ void parse_mmcif_rigid(std::istream& in, rigid& r) {
                     // prepared residue: donors come from the HD atoms, as for PDBQT. A
                     // nitrogen without H and with at most 2 covalent (non-metal) neighbours is
                     // an acceptor, except a backbone amide N (e.g. proline after a chain break)
-                    if (el == EL_TYPE_N)
-                        acceptor[i] = con.h_count[i] == 0
+                    donor[i] = con.h_count[i] > 0;
+                    acceptor[i] = el == EL_TYPE_O
+                                  || (con.h_count[i] == 0
                                       && con.heavy_degree[i] - con.metal_neighbors[i] <= 2
-                                      && !backbone_n;
+                                      && !backbone_n);
                 } else if (tpl) {
                     donor[i] = (flags & TPL_DONOR) != 0;
-                    acceptor[i] = el == EL_TYPE_N && (flags & TPL_ACCEPTOR);
+                    acceptor[i] = el == EL_TYPE_O || (flags & TPL_ACCEPTOR);
                     if (el == EL_TYPE_N && con.metal_neighbors[i] > 0)
                         donor[i] = acceptor[i] = false;  // metal-coordinating nitrogen
                     // 5'/3' terminal hydroxyls of a nucleic acid chain
@@ -688,36 +1009,70 @@ void parse_mmcif_rigid(std::istream& in, rigid& r) {
                         && con.heavy_degree[i] <= 1)
                         donor[i] = true;
                 } else {
-                    if (el == EL_TYPE_N && name == "N" && backbone_like
-                        && con.heavy_degree[i] <= 2)
-                        donor[i] = true;  // backbone of a modified amino acid
-                    else if (!(el == EL_TYPE_O && (name == "O" || name == "OXT") && backbone_like))
-                        untyped_residues.insert(res.name);
+                    const geometry_typer::polar p
+                        = el == EL_TYPE_O ? geometry.oxygen(i) : geometry.nitrogen(i);
+                    donor[i] = p.donor;
+                    acceptor[i] = p.acceptor;
+                    geometry_residues.insert(res.name);
                 }
             }
         }
 
-        if (tpl && tpl->ambiguous_his && !res.has_hydrogens) {
-            int nd1 = -1, ne2 = -1;
-            for (sz i : res.atoms) {
-                if (raw[i].name == "ND1") nd1 = int(i);
-                if (raw[i].name == "NE2") ne2 = int(i);
-            }
-            // the ring nitrogen opposite a metal-bound one carries the hydrogen
-            if (nd1 >= 0 && ne2 >= 0 && con.metal_neighbors[sz(nd1)] > 0) {
-                donor[sz(ne2)] = true;
-                acceptor[sz(ne2)] = false;
-            } else if (nd1 >= 0 && ne2 >= 0 && con.metal_neighbors[sz(ne2)] > 0) {
-                donor[sz(nd1)] = true;
-                acceptor[sz(nd1)] = false;
-            } else {
-                ambiguous_his.insert(res.name);
-            }
+        if (tpl && tpl->ambiguous_his && !res.has_hydrogens) unresolved_his.push_back(&res);
+    }
+
+    // histidine tautomers, once every other residue has donors/acceptors
+    his_counts his;
+    const histidine_resolver resolver(atoms, con, grid, residue_of, donor, acceptor);
+    std::vector<std::pair<sz, sz> > his_rings;
+    std::vector<std::pair<int, int> > his_votes;
+    for (const residue_info* res : unresolved_his) {
+        int nd1 = -1, ne2 = -1;
+        for (sz i : res->atoms) {
+            if (raw[i].name == "ND1") nd1 = int(i);
+            if (raw[i].name == "NE2") ne2 = int(i);
         }
+        if (nd1 < 0 || ne2 < 0) continue;
+        his_rings.push_back(std::make_pair(sz(nd1), sz(ne2)));
+        his_votes.push_back(std::make_pair(resolver.vote(sz(nd1)), resolver.vote(sz(ne2))));
+    }
+    VINA_FOR_IN(k, his_rings) {
+        const sz nd1 = his_rings[k].first, ne2 = his_rings[k].second;
+        const bool nd1_metal = con.metal_neighbors[nd1] > 0, ne2_metal = con.metal_neighbors[ne2] > 0;
+        int v1 = his_votes[k].first, v2 = his_votes[k].second;
+        bool nd1_h, ne2_h;
+        if (nd1_metal || ne2_metal) {
+            // the ring nitrogen opposite a metal-bound one carries the hydrogen
+            nd1_h = !nd1_metal;
+            ne2_h = !ne2_metal;
+        } else if (v1 > 0 && v2 > 0) {
+            nd1_h = ne2_h = true;
+            ++his.hip;
+        } else if (v2 > 0 || v1 < 0) {
+            nd1_h = false;
+            ne2_h = true;
+            ++his.hie;
+        } else {
+            // HID also when there is no evidence, as PDB2PQR and OpenMM/PDBFixer do
+            nd1_h = true;
+            ne2_h = false;
+            if (v1 > 0 || v2 < 0)
+                ++his.hid;
+            else
+                ++his.unresolved;
+        }
+        donor[nd1] = nd1_h;
+        donor[ne2] = ne2_h;
+        acceptor[nd1] = !nd1_h && !nd1_metal;
+        acceptor[ne2] = !ne2_h && !ne2_metal;
     }
 
     VINA_FOR(i, n)
-    if (acceptor[i]) atoms[i].ad = AD_TYPE_NA;
+    if (acceptor[i] && ad_type_to_el_type(atoms[i].ad) == EL_TYPE_N) atoms[i].ad = AD_TYPE_NA;
+
+    // donors are only needed where hydrogens are missing from the file
+    VINA_FOR(i, n)
+    if (residues[residue_of[i]].has_hydrogens) donor[i] = false;
 
     r.atoms.insert(r.atoms.end(), atoms.begin(), atoms.end());
     r.implicit_donors.resize(r.atoms.size() - n, false);
@@ -729,13 +1084,15 @@ void parse_mmcif_rigid(std::istream& in, rigid& r) {
     if (reader.skipped_altloc_atoms > 0)
         std::cerr << "WARNING: mmCIF receptor has alternate locations; kept the first one of each "
                      "residue (" << reader.skipped_altloc_atoms << " atoms ignored).\n";
-    if (!ambiguous_his.empty())
-        std::cerr << "WARNING: mmCIF receptor has histidines without hydrogens; ND1 and NE2 are "
-                     "treated as both donor and acceptor. Add hydrogens or name them HID/HIE/HIP "
-                     "to set the tautomer.\n";
-    if (!untyped_residues.empty())
+    const sz n_his = his.hid + his.hie + his.hip + his.unresolved;
+    if (n_his > 0)
+        std::cerr << "NOTE: " << n_his
+                  << " histidines without hydrogens; tautomers assigned from hydrogen-bond "
+                     "partners (HID " << his.hid << ", HIE " << his.hie << ", HIP " << his.hip
+                  << ", HID by default " << his.unresolved << ").\n";
+    if (!geometry_residues.empty())
         std::cerr << "WARNING: mmCIF receptor residues without hydrogens and without a built-in "
-                     "template (" << join_names(untyped_residues)
-                  << "): their hydrogen-bond donors cannot be identified. Add hydrogens to the "
-                     "receptor for exact typing.\n";
+                     "template (" << join_names(geometry_residues)
+                  << ") were typed from their geometry (bond lengths, angles, ring planarity). "
+                     "Add hydrogens to the receptor for exact typing.\n";
 }

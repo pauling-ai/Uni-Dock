@@ -107,16 +107,17 @@ TEST_CASE("mmcif receptor without hydrogens uses residue templates",
     }
     REQUIRE(heavy == from_cif.grid_atoms.size());
 
-    // The only atoms a template cannot type like the prepared PDBQT are histidine ring
-    // nitrogens: HIS has no tautomer information (donor+acceptor instead of donor), and HIZ is
-    // not a standard residue name (its 2 residues lose the ring donors).
+    // The only atoms typed differently from this PDBQT are histidine ring nitrogens: the PDBQT
+    // protonates both ring nitrogens of every histidine, while without hydrogens each HIS gets
+    // one tautomer from its hydrogen-bond partners, and the two HIZ
+    // (not a standard name) are typed from geometry as imidazoles (donor and acceptor).
     for (const std::string& m : mismatches) {
         INFO(m);
         const bool his_ring_n = m == "HIS:ND1" || m == "HIS:NE2" || m == "HIZ:ND1" || m == "HIZ:NE2";
         CHECK(his_ring_n);
     }
-    CHECK(mismatches.size() == 8);
-    CHECK(cif_donors == pdbqt_donors - 4);
+    CHECK(mismatches.size() == 6);
+    CHECK(cif_donors == pdbqt_donors - 2);
 }
 
 TEST_CASE("mmcif tokenizer, models and alternate locations", "[parse_mmcif_rigid]") {
@@ -212,12 +213,12 @@ TEST_CASE("mmcif amino acid templates without hydrogens", "[parse_mmcif_template
         "N NE1 TRP 13 180 0 0",  // 18
         "SE SE MSE 14 190 0 0",  // 19 selenium behaves as sulfur
         "O O   HOH 15 200 0 0",   // 20 water
-        "N N   UNK 16 210 0 0",   // 21 unknown residue, no backbone
+        "N N   UNK 16 210 0 0",   // 21 no template, no neighbours: ammonia-like donor
     });
     const std::vector<bool> expected_donors = {true,  false, false, true,  false, false,
-                                               true,  true,  true,  true,  true,  true,
+                                               true,  true,  true,  true,  false, true,
                                                false, true,  true,  true,  false, false,
-                                               true,  false, true,  false};
+                                               true,  false, true,  true};
     REQUIRE(r.implicit_donors == expected_donors);
 
     REQUIRE(r.atoms[0].ad == AD_TYPE_N);
@@ -228,7 +229,7 @@ TEST_CASE("mmcif amino acid templates without hydrogens", "[parse_mmcif_template
     REQUIRE(r.atoms[6].ad == AD_TYPE_N);
     REQUIRE(r.atoms[7].ad == AD_TYPE_N);
     REQUIRE(r.atoms[8].ad == AD_TYPE_N);
-    REQUIRE(r.atoms[9].ad == AD_TYPE_NA);  // HIS: donor and acceptor
+    REQUIRE(r.atoms[9].ad == AD_TYPE_N);  // HIS without H-bond partners: HID
     REQUIRE(r.atoms[10].ad == AD_TYPE_NA);
     REQUIRE(r.atoms[16].ad == AD_TYPE_A);
     REQUIRE(r.atoms[17].ad == AD_TYPE_C);
@@ -370,4 +371,237 @@ TEST_CASE("mmcif without type_symbol or label columns", "[parse_mmcif_rigid]") {
     REQUIRE(r.atoms[1].ad == AD_TYPE_Ca);  // calcium ion
     REQUIRE(r.atoms[2].ad == AD_TYPE_Zn);
     REQUIRE(r.atoms[3].ad == AD_TYPE_H);
+}
+
+namespace {
+
+// index of the atom "res seq name" in rows built by atom_site_cif
+sz row_index(const std::vector<std::string>& rows, const std::string& res, int seq,
+             const std::string& name) {
+    VINA_FOR_IN(i, rows) {
+        std::istringstream fields(rows[i]);
+        std::string el, atom_name, res_name;
+        int res_seq;
+        fields >> el >> atom_name >> res_name >> res_seq;
+        if (atom_name == name && res_name == res && res_seq == seq) return i;
+    }
+    FAIL("atom " << res << " " << seq << " " << name << " not found");
+    return 0;
+}
+
+}  // namespace
+
+TEST_CASE("mmcif residues without template or hydrogens are typed from geometry",
+          "[parse_mmcif_geometry]") {
+    // heavy atoms of RDKit/MMFF-optimised molecules, one residue each
+    const std::vector<std::string> rows = {
+        "C C1 ETH 1 -0.863 0.220 0.203",
+        "C C2 ETH 1 0.406 -0.375 -0.370",
+        "O O1 ETH 1 1.527 0.404 0.022",
+        "C C1 ACN 2 23.733 -0.034 -0.251",
+        "C C2 ACN 2 24.960 -0.009 0.620",
+        "C C3 ACN 2 26.289 0.039 -0.084",
+        "O O1 ACN 2 24.880 -0.028 1.847",
+        "C C1 ACT 3 49.362 -0.055 -0.005",
+        "C C2 ACT 3 50.875 0.069 0.007",
+        "O O1 ACT 3 51.507 -1.018 -0.108",
+        "O O2 ACT 3 51.309 1.249 0.130",
+        "C C1 ACI 4 74.043 -0.073 -0.088",
+        "C C2 ACI 4 75.490 0.288 -0.018",
+        "O O1 ACI 4 75.976 1.384 -0.239",
+        "O O2 ACI 4 76.264 -0.756 0.331",
+        "C C1 PHN 5 100.603 1.017 0.338",
+        "C C2 PHN 5 99.261 1.077 0.716",
+        "C C3 PHN 5 98.403 0.015 0.423",
+        "C C4 PHN 5 98.886 -1.108 -0.249",
+        "C C5 PHN 5 100.227 -1.170 -0.627",
+        "C C6 PHN 5 101.075 -0.108 -0.332",
+        "O O1 PHN 5 102.378 -0.209 -0.720",
+        "C C1 MAM 6 124.432 0.077 -0.047",
+        "N N1 MAM 6 125.856 -0.069 -0.293",
+        "C C1 NIT 7 149.514 0.004 -0.008",
+        "C C2 NIT 7 150.975 -0.008 0.016",
+        "N N1 NIT 7 152.135 -0.018 0.034",
+        "C C1 PYR 8 176.143 -0.303 0.058",
+        "C C2 PYR 8 175.158 -1.284 -0.005",
+        "C C3 PYR 8 173.834 -0.880 -0.072",
+        "N N1 PYR 8 173.443 0.413 -0.080",
+        "C C4 PYR 8 174.421 1.343 -0.017",
+        "C C5 PYR 8 175.771 1.037 0.053",
+        "C C1 PRL 9 199.232 -0.905 0.140",
+        "C C2 PRL 9 198.899 0.441 -0.144",
+        "C C3 PRL 9 200.078 1.148 -0.224",
+        "N N1 PRL 9 201.111 0.275 0.002",
+        "C C4 PRL 9 200.604 -0.979 0.226",
+        "C C1 IMI 10 225.171 0.964 0.224",
+        "C C2 IMI 10 226.228 0.123 -0.031",
+        "N N1 IMI 10 225.784 -1.142 -0.315",
+        "C C3 IMI 10 224.475 -1.077 -0.234",
+        "N N2 IMI 10 224.057 0.182 0.091",
+        "C C1 MIM 11 248.327 -0.095 -0.015",
+        "N N1 MIM 11 249.759 0.049 -0.008",
+        "C C2 MIM 11 250.680 -0.954 0.091",
+        "C C3 MIM 11 251.899 -0.317 0.054",
+        "N N2 MIM 11 251.736 1.040 -0.065",
+        "C C4 MIM 11 250.437 1.230 -0.099",
+        "C C1 OXZ 12 274.107 -0.467 0.200",
+        "C C2 OXZ 12 274.413 0.812 -0.193",
+        "O O1 OXZ 12 275.766 0.901 -0.317",
+        "C C3 OXZ 12 276.204 -0.346 0.013",
+        "N N1 OXZ 12 275.259 -1.202 0.329",
+        "C C1 NMA 13 301.863 0.232 0.228",
+        "C C2 NMA 13 300.397 0.334 0.550",
+        "O O1 NMA 13 299.982 1.000 1.493",
+        "N N1 NMA 13 299.582 -0.367 -0.310",
+        "C C3 NMA 13 298.148 -0.293 -0.193",
+        "O O1 PYO 14 327.610 0.383 -0.060",
+        "C C1 PYO 14 326.399 0.195 -0.032",
+        "C C2 PYO 14 325.441 1.331 -0.032",
+        "C C3 PYO 14 324.123 1.086 -0.001",
+        "C C4 PYO 14 323.625 -0.270 0.033",
+        "C C5 PYO 14 324.487 -1.295 0.033",
+        "N N1 PYO 14 325.838 -1.060 0.001",
+        "C C1 MPO 15 348.787 0.239 -0.238",
+        "O O1 MPO 15 350.013 -0.167 -0.797",
+        "P P1 MPO 15 351.259 -0.262 0.269",
+        "O O2 MPO 15 352.430 -0.713 -0.590",
+        "O O3 MPO 15 351.375 1.156 0.813",
+        "O O4 MPO 15 350.782 -1.289 1.288",
+        "C C1 AMD 16 374.285 -0.837 0.028",
+        "C C2 AMD 16 375.100 0.355 0.446",
+        "N N1 AMD 16 374.559 1.518 0.601",
+        "N N2 AMD 16 376.438 0.225 0.633",
+        "C C1 IMN 17 398.714 0.347 0.380",
+        "C C2 IMN 17 399.346 -0.587 -0.609",
+        "N N1 IMN 17 400.602 -0.777 -0.824",
+        "C C3 IMN 17 401.569 -0.023 -0.043",
+        "C C1 TMA 18 424.701 1.327 0.359",
+        "N N1 TMA 18 424.854 -0.114 0.555",
+        "C C2 TMA 18 426.254 -0.505 0.398",
+        "C C3 TMA 18 424.009 -0.850 -0.384",
+        "O O1 CHX 19 451.346 -1.311 -1.000",
+        "C C1 CHX 19 451.074 -0.785 0.297",
+        "C C2 CHX 19 449.686 -1.250 0.735",
+        "C C3 CHX 19 448.574 -0.613 -0.099",
+        "C C4 CHX 19 448.681 0.909 -0.110",
+        "C C5 CHX 19 450.060 1.374 -0.568",
+        "C C6 CHX 19 451.173 0.742 0.267",
+        "C C1 SAP 20 476.288 -0.099 0.344",
+        "S S1 SAP 20 474.691 -0.510 -0.325",
+        "O O1 SAP 20 474.099 -1.569 0.456",
+        "O O2 SAP 20 474.769 -0.559 -1.765",
+        "N N1 SAP 20 473.806 0.867 0.034",
+        "C C1 SAS 21 501.744 -0.144 -0.400",
+        "S S1 SAS 21 500.543 0.735 0.578",
+        "O O1 SAS 21 500.073 1.883 -0.162",
+        "O O2 SAS 21 501.056 0.853 1.924",
+        "N N1 SAS 21 499.292 -0.384 0.663",
+        "C C2 SAS 21 498.300 -0.380 -0.410",
+        "C C1 DMA 22 523.065 0.963 -1.061",
+        "N N1 DMA 22 523.687 -0.135 -0.323",
+        "C C2 DMA 22 522.826 -0.812 0.644",
+        "C C3 DMA 22 525.068 -0.094 -0.088",
+        "C C4 DMA 22 525.695 -0.944 0.843",
+        "C C5 DMA 22 527.078 -0.918 1.070",
+        "C C6 DMA 22 527.886 -0.042 0.359",
+        "C C7 DMA 22 527.308 0.800 -0.581",
+        "C C8 DMA 22 525.924 0.767 -0.801",
+    };
+    rigid r = parse_rows(rows);
+    struct expectation {
+        const char* res;
+        int seq;
+        const char* name;
+        sz ad;
+        bool donor;
+    };
+    const expectation expected[] = {
+        {"ETH", 1, "O1", AD_TYPE_OA, true},   // alcohol
+        {"ACN", 2, "O1", AD_TYPE_OA, false},  // ketone
+        {"ACT", 3, "O1", AD_TYPE_OA, false},  // carboxylate
+        {"ACT", 3, "O2", AD_TYPE_OA, false},
+        {"ACI", 4, "O1", AD_TYPE_OA, false},  // carboxylic acid: carboxylate at pH 7
+        {"ACI", 4, "O2", AD_TYPE_OA, false},
+        {"PHN", 5, "O1", AD_TYPE_OA, true},   // phenol
+        {"PHN", 5, "C1", AD_TYPE_A, false},   // aromatic ring
+        {"MAM", 6, "N1", AD_TYPE_N, true},    // amine
+        {"NIT", 7, "N1", AD_TYPE_NA, false},  // nitrile
+        {"PYR", 8, "N1", AD_TYPE_NA, false},  // pyridine
+        {"PRL", 9, "N1", AD_TYPE_N, true},    // pyrrole
+        {"IMI", 10, "N1", AD_TYPE_NA, true},  // imidazole: tautomer unknown
+        {"IMI", 10, "N2", AD_TYPE_NA, true},
+        {"MIM", 11, "N1", AD_TYPE_N, false},  // N-methyl imidazole N1
+        {"MIM", 11, "N2", AD_TYPE_NA, false}, // ... and N3
+        {"OXZ", 12, "N1", AD_TYPE_NA, false}, // oxazole
+        {"OXZ", 12, "O1", AD_TYPE_OA, false},
+        {"NMA", 13, "N1", AD_TYPE_N, true},   // secondary amide
+        {"NMA", 13, "O1", AD_TYPE_OA, false},
+        {"PYO", 14, "N1", AD_TYPE_N, true},   // 2-pyridone (lactam)
+        {"PYO", 14, "O1", AD_TYPE_OA, false},
+        {"MPO", 15, "O1", AD_TYPE_OA, false}, // phosphate ester
+        {"MPO", 15, "O2", AD_TYPE_OA, false},
+        {"MPO", 15, "O3", AD_TYPE_OA, false},
+        {"AMD", 16, "N1", AD_TYPE_N, true},   // amidinium
+        {"AMD", 16, "N2", AD_TYPE_N, true},
+        {"IMN", 17, "N1", AD_TYPE_NA, false}, // imine
+        {"TMA", 18, "N1", AD_TYPE_N, true},   // tertiary aliphatic amine: protonated at pH 7
+        {"CHX", 19, "O1", AD_TYPE_OA, true},  // cyclohexanol
+        {"CHX", 19, "C2", AD_TYPE_C, false},  // non-planar ring: not aromatic
+        {"SAP", 20, "N1", AD_TYPE_NA, true},  // primary sulfonamide
+        {"SAS", 21, "N1", AD_TYPE_NA, true},  // secondary sulfonamide
+        {"DMA", 22, "N1", AD_TYPE_N, false},  // N,N-dimethylaniline: not a basic amine
+    };
+    for (const expectation& e : expected) {
+        const sz i = row_index(rows, e.res, e.seq, e.name);
+        INFO(e.res << " " << e.name);
+        CHECK(r.atoms[i].ad == e.ad);
+        CHECK(r.implicit_donors[i] == e.donor);
+    }
+}
+
+TEST_CASE("mmcif histidine tautomers from hydrogen-bond partners", "[parse_mmcif_templates]") {
+    const std::vector<std::string> rows = {
+        "C CB HIS 101 1.893 40.035 0.227",
+        "C CG HIS 101 0.422 39.954 0.102",
+        "C CD2 HIS 101 -0.426 40.679 -0.707",
+        "N NE2 HIS 101 -1.679 40.208 -0.428",
+        "C CE1 HIS 101 -1.551 39.234 0.519",
+        "N ND1 HIS 101 -0.295 39.057 0.859",
+        "O OD1 ASP 102 0.647 37.177 2.782",
+        "C CB HIS 103 1.893 80.035 0.227",
+        "C CG HIS 103 0.422 79.954 0.102",
+        "C CD2 HIS 103 -0.426 80.679 -0.707",
+        "N NE2 HIS 103 -1.679 80.208 -0.428",
+        "C CE1 HIS 103 -1.551 79.234 0.519",
+        "N ND1 HIS 103 -0.295 79.057 0.859",
+        "N NZ LYS 104 0.647 77.177 2.782",
+        "C CB HIS 105 1.893 120.035 0.227",
+        "C CG HIS 105 0.422 119.954 0.102",
+        "C CD2 HIS 105 -0.426 120.679 -0.707",
+        "N NE2 HIS 105 -1.679 120.208 -0.428",
+        "C CE1 HIS 105 -1.551 119.234 0.519",
+        "N ND1 HIS 105 -0.295 119.057 0.859",
+        "O OD1 ASP 106 0.647 117.177 2.782",
+        "O OE1 GLU 107 -4.116 121.095 -1.609",
+        "C CB HIS 108 1.893 160.035 0.227",
+        "C CG HIS 108 0.422 159.954 0.102",
+        "C CD2 HIS 108 -0.426 160.679 -0.707",
+        "N NE2 HIS 108 -1.679 160.208 -0.428",
+        "C CE1 HIS 108 -1.551 159.234 0.519",
+        "N ND1 HIS 108 -0.295 159.057 0.859",
+        "O OD1 ASP 109 -0.577 161.015 2.911",
+    };
+    rigid r = parse_rows(rows);
+    const auto check = [&](int seq, bool nd1_h, bool ne2_h) {
+        const sz nd1 = row_index(rows, "HIS", seq, "ND1"), ne2 = row_index(rows, "HIS", seq, "NE2");
+        INFO("HIS " << seq);
+        CHECK(r.implicit_donors[nd1] == nd1_h);
+        CHECK(r.implicit_donors[ne2] == ne2_h);
+        CHECK(r.atoms[nd1].ad == (nd1_h ? AD_TYPE_N : AD_TYPE_NA));
+        CHECK(r.atoms[ne2].ad == (ne2_h ? AD_TYPE_N : AD_TYPE_NA));
+    };
+    check(101, true, false);  // carboxylate O in front of ND1: HID
+    check(103, false, true);  // lysine NZ in front of ND1: HIE
+    check(105, true, true);   // carboxylates in front of both: HIP
+    check(108, true, false);  // partner not along the N-H direction: default HID
 }

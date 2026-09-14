@@ -80,7 +80,13 @@ To launch a Uni-Dock job, the most important parameters are as follows:
 
 - `--receptor`: filepath of the receptor (PDBQT, or PDBx/mmCIF with a `.cif`/`.mmcif` extension)
 
-     mmCIF receptors are read directly (no PDBQT conversion). AutoDock atom types are derived from the structure: residues that contain hydrogens are typed from their connectivity like a prepared PDBQT (polar H → HD, which defines donors); residues without hydrogens use built-in templates of the standard amino acids, nucleotides and water. Only the first model and the first alternate location of each residue are used. For best results use a protonated structure; histidines without hydrogens are treated as both donor and acceptor unless named HID/HIE/HIP. `--flex` residues must still be PDBQT.
+     mmCIF receptors are read directly (no PDBQT conversion). AutoDock atom types are derived from the structure:
+
+     - residues that contain hydrogens are typed from their connectivity like a prepared PDBQT (polar H → HD, which defines donors);
+     - residues without hydrogens use built-in templates of the standard amino acids, nucleotides and water. Histidine tautomers (HID/HIE/HIP) are chosen from their hydrogen-bond partners, with HID when there is no evidence (as PDB2PQR and PDBFixer do); residues named HID/HIE/HIP keep their name;
+     - residues without hydrogens and without a template (ligands, cofactors, modified residues) are typed from their geometry: bond lengths, angles and ring planarity identify hydroxyls, carbonyls, amines, nitriles, pyridine/pyrrole-type nitrogens, etc., with protonation states for pH 7.
+
+     Only the first model and the first alternate location of each residue are used. A protonated structure gives exact typing; without hydrogens the typing is inferred (see the warnings printed when loading). `--flex` residues must still be PDBQT.
 
      (If you want to use `ad4` scoring function, you need to generate affinity maps first and use `--maps <mapdir/receptor_prefix>` instead of `--receptor`. The method to generate maps is in [here](https://autodock-vina.readthedocs.io/en/latest/docking_basic.html#optional-generating-affinity-maps-for-autodock-ff))
 
