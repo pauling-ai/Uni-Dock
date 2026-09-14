@@ -69,7 +69,7 @@ class UniDock(Base):
         Initializes a UniDock object.
 
         Args:
-            receptor (Path): Path to the receptor file in PDB or PDBQT format.
+            receptor (Path): Path to the receptor file in PDB, PDBQT or mmCIF format (mmCIF is read natively by Uni-Dock).
             ligands (List[Path]): List of paths to the ligand files in SDF format.
             workdir (Path): Path to the working directory.
             center_x (float): X-coordinate of the center of the docking box.
@@ -96,8 +96,8 @@ class UniDock(Base):
             except Exception as e:
                 logging.error(f"Failed to convert PDB file to PDBQT: {e}")
                 exit(1)
-        if receptor.suffix != '.pdbqt':
-            logging.error("receptor file must be pdb/pdbqt format")
+        if receptor.suffix.lower() not in ('.pdbqt', '.cif', '.mmcif'):
+            logging.error("receptor file must be pdb/pdbqt/mmcif format")
             exit(1)
 
         self.receptor = receptor
