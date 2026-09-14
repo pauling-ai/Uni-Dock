@@ -87,8 +87,8 @@ class MultiConfDock(Base):
         if receptor.suffix == ".pdb":
             pdb2pdbqt(receptor, workdir.joinpath(receptor.stem + ".pdbqt"))
             receptor = workdir.joinpath(receptor.stem + ".pdbqt")
-        if receptor.suffix != ".pdbqt":
-            logging.error("receptor file must be PDB or PDBQT format")
+        if receptor.suffix.lower() not in (".pdbqt", ".cif", ".mmcif"):
+            logging.error("receptor file must be PDB, PDBQT or mmCIF format")
             exit(1)
 
         self.receptor = receptor

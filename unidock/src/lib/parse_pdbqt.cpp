@@ -37,6 +37,7 @@
 #include "convert_substring.h"
 #include "utils.h"
 #include "parse_pdbqt.h"
+#include "parse_mmcif.h"
 #include "parse_error.h"
 #include "kernel.h"
 
@@ -1261,6 +1262,61 @@ model parse_receptor_pdbqt(const std::string& rigid_name, const std::string& fle
         tmp.initialize(nrp.mobility_matrix());
     }
 
+    return tmp.m;
+}
+
+// Heavy atoms whose polar hydrogens are not in the file cannot be found as "bonded to HD" by
+// model::assign_types, so promote them to XS donors once typing is done.
+static void apply_implicit_donors(atomv& grid_atoms, const std::vector<bool>& implicit_donors) {
+    VINA_CHECK(grid_atoms.size() == implicit_donors.size());
+    VINA_FOR_IN(i, grid_atoms) {
+        if (!implicit_donors[i]) continue;
+        sz& xs = grid_atoms[i].xs;
+        if (xs == XS_TYPE_N_P)
+            xs = XS_TYPE_N_D;
+        else if (xs == XS_TYPE_N_A)
+            xs = XS_TYPE_N_DA;
+        else if (xs == XS_TYPE_O_P)
+            xs = XS_TYPE_O_D;
+        else if (xs == XS_TYPE_O_A)
+            xs = XS_TYPE_O_DA;
+    }
+}
+
+model parse_receptor_mmcif(const std::string& rigid_name, const std::string& flex_name,
+                           atom_type::t atype) {
+    // Same assembly as parse_receptor_pdbqt, with the rigid part read natively from mmCIF
+    rigid r;
+    non_rigid_parsed nrp;
+    context c;
+    pdbqt_initializer tmp(atype);
+
+    try {
+        parse_mmcif_rigid(make_path(rigid_name), r);
+    } catch (struct_parse_error& e) {
+        std::cerr << e.what() << '\n';
+        exit(EXIT_FAILURE);
+    }
+
+    if (!flex_name.empty()) {
+        try {
+            parse_pdbqt_flex(make_path(flex_name), nrp, c);
+        } catch (struct_parse_error& e) {
+            std::cerr << e.what() << '\n';
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    tmp.initialize_from_rigid(r);
+    if (flex_name.empty()) {
+        distance_type_matrix mobility_matrix;
+        tmp.initialize(mobility_matrix);
+    } else {
+        tmp.initialize_from_nrp(nrp, c, false);
+        tmp.initialize(nrp.mobility_matrix());
+    }
+
+    apply_implicit_donors(tmp.m.grid_atoms, r.implicit_donors);
     return tmp.m;
 }
 

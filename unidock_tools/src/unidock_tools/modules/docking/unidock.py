@@ -45,6 +45,9 @@ class UniDockRunner:
             size_z = min(size_z*2, 25)
 
         if scoring.lower() == "ad4":
+            if Path(receptor).suffix.lower() in (".cif", ".mmcif"):
+                raise ValueError("ad4 scoring needs affinity maps generated from a PDBQT receptor; "
+                                 "mmCIF receptors are supported with vina and vinardo")
             map_dir = os.path.join(self.workdir, "mapdir")
             os.makedirs(map_dir, exist_ok=True)
             map_prefix = generate_ad4_grid(str(receptor), map_dir,
