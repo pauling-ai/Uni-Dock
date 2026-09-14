@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(
   Uni-Dock
-  VERSION 1.1.3
+  VERSION 1.2.0
   DESCRIPTION "GPU-Accelerated Docking with 1000-fold speedup"
   HOMEPAGE_URL "https://github.com/dptech-corp/Uni-Dock"
   LANGUAGES CXX CUDA)
@@ -14,7 +14,13 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # >>>>>> Language Configuration Begin
-set(CMAKE_CXX_STANDARD 14)
+# CUDA 13's bundled CCCL / libcu++ requires C++17; CUDA 12.x keeps C++14.
+if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD 17)
+else()
+  set(CMAKE_CXX_STANDARD 14)
+endif()
 
 set(CMAKE_CUDA_FLAGS_DEBUG "-g -G")
 option(Boost_USE_STATIC_LIBS "Whether to use static libs for boost" OFF)
@@ -25,7 +31,6 @@ check_language(CUDA)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   # https://en.wikipedia.org/wiki/CUDA#GPUs_supported
   set(CMAKE_CUDA_ARCHITECTURES
-    70 # V100
     75 # RTX 20, T4
     80 # A100, A800
     86 # RTX 30
@@ -34,6 +39,10 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     100 # B100, B200, GB200
     120 # RTX 50, B40
   )
+  # CUDA 13 removed Volta (sm_70 / V100); only target it on CUDA 12.x.
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.0)
+    list(PREPEND CMAKE_CUDA_ARCHITECTURES 70) # V100
+  endif()
 endif()
 
 # Add fast math for release build
@@ -66,12 +75,16 @@ set(REQUIRED_BOOST_COMPONENTS
   system thread serialization
   filesystem program_options timer
 )
+# Header-only Boost used (transitively) by the CUDA sources, e.g. boost/math/quaternion.hpp
+# via quaternion.h -> conf.h -> tree.h -> model.h. Must be part of the fetched Boost so the
+# cuda target resolves these to the fetched headers, not a (possibly newer) system Boost (#189).
+set(REQUIRED_BOOST_CUDA_HEADERS math)
 
 Set(FETCHCONTENT_QUIET FALSE) # Needed to print downloading progress
 
 if(FETCH_BOOST)
   set(BOOST_ENABLE_CMAKE ON)
-  set(BOOST_INCLUDE_LIBRARIES ${REQUIRED_BOOST_COMPONENTS})
+  set(BOOST_INCLUDE_LIBRARIES ${REQUIRED_BOOST_COMPONENTS} ${REQUIRED_BOOST_CUDA_HEADERS})
 
   # downloading a compressed release speeds up the download
   FetchContent_Declare(
@@ -129,6 +142,12 @@ target_include_directories(lib PUBLIC src/lib src/cuda)
 
 add_library(cuda OBJECT src/cuda/monte_carlo.cu src/cuda/precalculate.cu)
 target_include_directories(cuda PUBLIC src/lib src/cuda)
+# When using fetched Boost, link the header-only Boost::math so the CUDA target picks up the
+# fetched Boost headers instead of a newer system Boost (>=1.90 breaks nvcc with a
+# "constexpr constexpr" error in boost/math). See #189.
+if(FETCH_BOOST)
+  target_link_libraries(cuda PUBLIC Boost::math)
+endif()
 
 # >>>>>> Libraries Definitions End
 

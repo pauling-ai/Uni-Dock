@@ -257,6 +257,11 @@ public:
                     quasi_newton_par.max_steps
                         = unsigned((25 + m_model_gpu[l].num_movable_atoms()) / 3);
                     VINA_FOR_IN(i, poses) {
+                        // The GPU kernel's cuda_to_vina does not populate c.flex.
+                        // Initialize it from the model so model.set(c) doesn't crash.
+                        if (poses[i].c.flex.size() != m_model_gpu[l].get_size().flex.size()) {
+                            poses[i].c.flex = m_model_gpu[l].get_initial_conf().flex;
+                        }
                         // DEBUG_PRINTF("poses i score=%lf\n", poses[i].e);
                         const fl slope_orig = m_non_cache.slope;
                         VINA_FOR(p, refine_step) {
@@ -283,6 +288,7 @@ public:
             }
 
             for (int i = 0; i < poses.size(); ++i) {
+                if (!not_max(poses[i].e)) continue;  // skip out-of-bounds poses
                 if (m_verbosity > 1) std::cout << "ENERGY FROM SEARCH: " << poses[i].e << "\n";
 
                 m_model_gpu[l].set(poses[i].c);
@@ -323,6 +329,7 @@ public:
             }
 
             VINA_FOR_IN(i, poses) {
+                if (!not_max(poses[i].e)) continue;  // skip out-of-bounds poses
                 m_model_gpu[l].set(poses[i].c);
 
                 // Get RMSD between current pose and best_model
