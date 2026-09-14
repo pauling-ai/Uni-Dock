@@ -310,6 +310,51 @@ TEST_CASE("mmcif residues with hydrogens are typed from connectivity", "[parse_m
     REQUIRE(r.implicit_donors == std::vector<bool>(7, false));
 }
 
+TEST_CASE("mmcif hydrogen typing next to metals and chain breaks", "[parse_mmcif_rigid]") {
+    SECTION("backbone N without H is not an acceptor (proline after a chain break)") {
+        rigid r = parse_rows({
+            "N N  PRO 1 0.000 0.000 0.000",
+            "C CA PRO 1 1.470 0.000 0.000",
+            "C CD PRO 1 -0.900 1.100 0.000",
+            "H HA PRO 1 1.800 1.000 0.000",
+        });
+        REQUIRE(r.atoms[0].ad == AD_TYPE_N);
+        REQUIRE(r.atoms[3].ad == AD_TYPE_H);
+    }
+    SECTION("hydrogen pointing at a coordinated metal stays polar") {
+        rigid r = parse_rows({
+            "N  NE2 HIE 1 0.000 0.000 0.000",
+            "C  CE1 HIE 1 -0.700 1.100 0.000",
+            "C  CD2 HIE 1 -0.700 -1.100 0.000",
+            "H  HE2 HIE 1 1.020 0.000 0.000",   // 0.97 A from ZN, 1.02 A from NE2
+            "ZN ZN  ZN  2 1.990 0.000 0.000",
+        });
+        REQUIRE(r.atoms[3].ad == AD_TYPE_HD);
+        REQUIRE(r.atoms[0].ad == AD_TYPE_N);
+    }
+    SECTION("metal-coordinated N without H is still an acceptor, like Meeko") {
+        rigid r = parse_rows({
+            "N  N1 LIG 1 0.000 0.000 0.000",
+            "C  C1 LIG 1 1.300 0.000 0.000",
+            "C  C2 LIG 1 -0.650 1.130 0.000",
+            "H  H1 LIG 1 1.800 0.900 0.000",
+            "ZN ZN ZN  2 -0.650 -1.900 0.000",
+        });
+        REQUIRE(r.atoms[0].ad == AD_TYPE_NA);
+        REQUIRE(r.atoms[3].ad == AD_TYPE_H);
+    }
+    SECTION("nucleic acid terminal hydroxyls without hydrogens are donors") {
+        rigid r = parse_rows({
+            "O \"O5'\" DC 1 0.000 0.000 0.000",   // 5' end: only C5'
+            "C \"C5'\" DC 1 1.430 0.000 0.000",
+            "O \"O5'\" DC 2 20.000 0.000 0.000",  // linked to the phosphate
+            "C \"C5'\" DC 2 21.430 0.000 0.000",
+            "P P       DC 2 18.400 0.000 0.000",
+        });
+        REQUIRE(r.implicit_donors == std::vector<bool>({true, false, false, false, false}));
+    }
+}
+
 TEST_CASE("mmcif without type_symbol or label columns", "[parse_mmcif_rigid]") {
     std::istringstream in("data_t\nloop_\n_atom_site.auth_atom_id\n_atom_site.auth_comp_id\n"
                           "_atom_site.auth_asym_id\n_atom_site.auth_seq_id\n"
